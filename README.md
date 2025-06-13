@@ -1,4 +1,4 @@
-# System information
+#  System information
 
 System:
   Kernel: 6.1.0-37-amd64 arch: x86_64 bits: 64 compiler: gcc v: 12.2.0
