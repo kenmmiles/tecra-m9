@@ -1,0 +1,51 @@
+Kernel Version: 6.1.93
+Version Label:  v6-1-93
+Uptime: up 3 hours, 6 minutes
+
+Kernel Path: /boot/vmlinuz-6.1.93
+Kernel Size: 9.8M
+
+Module Count: 17
+Module Tree Size: 21M
+
+ZRAM Algorithm: lzo lzo-rle [zstd] 
+ZRAM Usage: /dev/zram0                              partition	1994492		530176		100
+
+Kernel Cmdline: BOOT_IMAGE=/boot/vmlinuz-6.1.93 root=UUID=7c4f462f-b252-4799-9c7d-63ed617be1a3 ro quiet
+
+Built-in Features: 1648
+=== Memory Footprint After Stack Initialization ===
+Used: 1.3Gi / 1.9Gi
+
+
+=== Top Memory Consumers ===
+    PID COMMAND           RSS
+  61464 msedge          367924
+  59145 msedge          167420
+  61034 msedge          138880
+ 235157 cc1             112844
+ 235192 cc1             84324
+   1022 Xorg            46980
+ 136417 msedge          46424
+  61088 msedge          34304
+   1112 xfwm4           24000
+
+Active Services:
+  bluetooth.service             loaded active running Bluetooth service
+
+=== SystemD Analyze ===
+Startup finished in 6.145s (kernel) + 1min 2.596s (userspace) = 1min 8.742s 
+graphical.target reached after 1min 2.554s in userspace.
+
+=== SystemD Analyze (blame top 10) ===
+1min 17.441s systemd-tmpfiles-clean.service
+     33.845s mpd.service
+     28.691s e2scrub_reap.service
+     11.403s udisks2.service
+     11.402s dev-sda1.device
+     10.521s systemd-journal-flush.service
+      9.889s accounts-daemon.service
+      9.804s power-profiles-daemon.service
+      9.765s polkit.service
+      8.375s ModemManager.service
+

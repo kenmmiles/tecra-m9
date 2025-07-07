@@ -1,0 +1,120 @@
+#!/bin/bash
+# tecra-tweaks.sh — Idempotent system tuning for old hardware (safe by default)
+
+set -e
+
+DRY_RUN=true
+
+usage() {
+    echo "Usage: $0 [-x] [-h]"
+    echo
+    echo "  -x    Execute changes (default is dry-run)"
+    echo "  -h    Show this help message"
+}
+
+while getopts ":xh" opt; do
+    case $opt in
+        x) DRY_RUN=false ;;
+        h) usage; exit 0 ;;
+        \?) echo "Invalid option: -$OPTARG" >&2; usage; exit 1 ;;
+    esac
+done
+
+info()    { echo "→ $*"; }
+success() { echo "✓ $*"; }
+skip()    { echo "– $*"; }
+warn()    { echo "⚠️  $*"; }
+
+log_exec() {
+    if [ "$DRY_RUN" = false ]; then
+        eval "$@"
+    else
+        echo "[dry-run] $@"
+    fi
+}
+
+echo "=== [Mode: $([ "$DRY_RUN" = true ] && echo dry-run || echo execute)] ==="
+
+echo -e "\n=== [Filesystem tuning for ext4 /dev/sda? partitions] ==="
+for part in /dev/sda?; do
+    [ -b "$part" ] || continue
+    fs_type=$(lsblk -no FSTYPE "$part")
+    [ "$fs_type" = "ext4" ] || { skip "$part (not ext4)"; continue; }
+
+    success "ext4 detected on $part"
+
+    if ! sudo tune2fs -l "$part" | grep -q 'dir_index'; then
+        info "Enabling dir_index on $part"
+        log_exec "sudo tune2fs -O dir_index $part"
+    else
+        success "dir_index already set on $part"
+    fi
+
+    if ! sudo tune2fs -l "$part" | grep -q 'journal_data: writeback'; then
+        info "Setting journal_data_writeback on $part"
+        log_exec "sudo tune2fs -o journal_data_writeback $part"
+    else
+        success "journal_data_writeback already active on $part"
+    fi
+done
+
+echo -e "\n=== [fstab: ensuring noatime on sda ext4 mounts] ==="
+for part in /dev/sda?; do
+    [ -b "$part" ] || continue
+    [ "$(lsblk -no FSTYPE "$part")" = "ext4" ] || continue
+    uuid=$(blkid -s UUID -o value "$part")
+
+    if grep -q "UUID=$uuid" /etc/fstab; then
+        if grep -q "UUID=$uuid.*noatime" /etc/fstab; then
+            success "noatime already present for $part (UUID=$uuid)"
+        else
+            info "Injecting noatime for UUID=$uuid in /etc/fstab"
+            if [ "$DRY_RUN" = false ]; then
+                backup="/etc/fstab.bak.$(date +%F-%H%M)"
+                sudo cp /etc/fstab "$backup"
+                success "Backed up fstab to $backup"
+                sudo sed -i "/UUID=$uuid/ s/defaults/defaults,noatime/" /etc/fstab
+            else
+                echo "[dry-run] Would patch fstab for UUID=$uuid"
+            fi
+        fi
+    else
+        warn "No matching fstab entry for $part (UUID=$uuid)"
+    fi
+done
+
+echo -e "\n=== [sysctl: vm.swappiness=10] ==="
+current_swappiness=$(sysctl -n vm.swappiness)
+if [ "$current_swappiness" -eq 10 ]; then
+    success "vm.swappiness already set"
+else
+    info "Setting vm.swappiness to 10"
+    if [ "$DRY_RUN" = false ]; then
+        sudo sed -i '/^vm\.swappiness/d' /etc/sysctl.conf
+        echo 'vm.swappiness=10' | sudo tee -a /etc/sysctl.conf > /dev/null
+        sudo sysctl -w vm.swappiness=10
+    else
+        echo "[dry-run] Would update /etc/sysctl.conf and sysctl live value"
+    fi
+fi
+
+echo -e "\n=== [hdparm: persistent HDD tuning in /etc/hdparm.conf] ==="
+hdparm_conf="/etc/hdparm.conf"
+if grep -q '/dev/sda {' "$hdparm_conf" 2>/dev/null; then
+    success "hdparm already configured"
+else
+    info "Writing hdparm settings"
+    if [ "$DRY_RUN" = false ]; then
+        sudo tee "$hdparm_conf" > /dev/null <<EOF
+/dev/sda {
+    write-caching = on
+    apm = 254
+}
+EOF
+    else
+        echo "[dry-run] Would write hdparm config to $hdparm_conf"
+    fi
+fi
+
+echo -e "\n=== ✅ Tecra tweaks complete. DRY_RUN=$DRY_RUN ==="
+

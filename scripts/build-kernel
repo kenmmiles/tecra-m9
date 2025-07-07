@@ -1,0 +1,29 @@
+#!/bin/bash
+
+set -e 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+CURRENT="$ROOT_DIR/kernel/config/current"
+source "$ROOT_DIR/profile"
+
+cd "$KDIR" || exit 1
+
+echo "[1/7] Link $KDIR/.config config/current"
+rm -f "$CURRENT"
+ln -sf "$KDIR/.config" "$CURRENT"
+
+echo "[2/7] Building kernel and modules..."
+make -j"$(nproc)"
+
+echo "[3/7] Installing modules..."
+sudo make modules_install
+
+sudo ln -sf "${KDIR}" /lib/modules/"${KVER}"/build
+
+echo "[5/7] Installing kernel..."
+sudo make install
+
+echo "[6/7] Updating GRUB..."
+sudo update-grub
+
+echo "Kernel ${KVER} complete."

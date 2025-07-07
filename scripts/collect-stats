@@ -1,0 +1,85 @@
+#!/bin/bash
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+
+#kernel_path="/boot/vmlinuz-$(uname -r)"
+#printf 'kernel path: %s\n' "$kernel_path"
+#printf 'kernel size: %s\n' "$(du -h "$kernel_path" | cut -f 1)"
+#printf 'module count: %s\n' "$(find /lib/modules/"$(uname -r)" -name '*.ko' | wc -l)"
+#printf 'module size: %s\n'  "$(du -sh /lib/modules/"$(uname -r)" | cut -f 1)"
+
+kernel_rel="$(uname -r)"
+version="v${kernel_rel//[^a-zA-Z0-9]/-}"
+outfile="$ROOT_DIR/kernel/stats/kernel-${version}.txt"
+kernel_path="/boot/vmlinuz-$kernel_rel"
+module_path="/lib/modules/$kernel_rel"
+
+#localver=$(grep '^CONFIG_LOCALVERSION=' "/boot/config-$kernel_rel" | cut -d'"' -f2)
+#basever="${kernel_rel%%-*}"  # Strip suffix from uname -r
+#clean_local="${localver//[^a-zA-Z0-9]/-}"  # Sanitize for file naming
+#version="v${basever}${clean_local}"
+#outfile="$ROOT_DIR/stats/kernel-${version}.txt"
+
+mkdir -p "$ROOT_DIR/kernel/stats"
+{
+    echo "Kernel Version: $kernel_rel"
+    echo "Version Label:  $version"
+    echo "Uptime: $(uptime -p)"
+    echo ""
+
+    echo "Kernel Path: $kernel_path"
+    echo -n "Kernel Size: "
+    du -h "$kernel_path" | cut -f 1
+    echo ""
+
+    echo -n "Module Count: "
+    find "$module_path" -name '*.ko' | wc -l
+    echo -n "Module Tree Size: "
+    du -sh "$module_path" | cut -f 1
+    echo ""
+
+    echo -n "ZRAM Algorithm: "
+    cat /sys/block/zram0/comp_algorithm 2>/dev/null || echo "N/A"
+    echo -n "ZRAM Usage: "
+    grep zram0 /proc/swaps || echo "No zram swap"
+    echo ""
+
+    echo -n "Kernel Cmdline: "
+    cat /proc/cmdline
+    echo ""
+
+    if [[ -f /boot/config-"$kernel_rel" ]]; then
+        builtin_count=$(grep '=y' /boot/config-"$kernel_rel" | wc -l)
+        echo "Built-in Features: $builtin_count"
+    elif zcat /proc/config.gz &>/dev/null; then
+        builtin_count=$(zcat /proc/config.gz | grep '=y' | wc -l)
+        echo "Built-in Features: $builtin_count"
+    else
+        echo "Built-in Features: (kernel config not found)"
+    fi
+
+    echo "=== Memory Footprint After Stack Initialization ==="
+    free -h | awk '/^Mem:/ {print "Used: " $3 " / " $2}'
+    echo ""
+
+    echo ""
+    echo "=== Top Memory Consumers ==="
+    ps -eo pid,comm,rss --sort=-rss | head -n 10
+
+    echo ""
+    echo "Active Services:"
+    systemctl --type=service --state=running | grep -E 'network|bluetooth' || echo "No matching services found"
+
+    echo ""
+    echo "=== SystemD Analyze ==="
+    systemd-analyze
+
+    echo ""
+    echo "=== SystemD Analyze (blame top 10) ==="
+    systemd-analyze blame | head -n 10
+
+    echo ""
+} | tee "$outfile"

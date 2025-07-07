@@ -1,0 +1,3 @@
+#!/bin/bash
+
+inxi -Fzxx -C -I -S -G -d -m -E

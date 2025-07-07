@@ -1,0 +1,217 @@
+#!/bin/bash
+
+set -e
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+source ~/.rc-common
+
+manage-service() {
+  local action="$1"; shift
+
+  for svc in "$@"; do
+    systemctl list-unit-files | grep -q "^$svc" || {
+      echo "$svc does not exist. Skipping."
+      continue
+    }
+
+    if systemctl is-enabled --quiet "$svc"; then
+      if [[ "$action" == "disable" ]]; then
+        echo "Disabling $svc..."
+        sudo systemctl disable "$svc"
+      else
+        echo "$svc is already enabled."
+      fi
+    else
+      if [[ "$action" == "enable" ]]; then
+        echo "Enabling $svc..."
+        sudo systemctl enable "$svc"
+      else
+        echo "$svc is already disabled."
+      fi
+    fi
+  done
+}
+
+enable-service()  { manage-service enable "$@"; }
+disable-service() { manage-service disable "$@"; }
+
+sudo apt update
+
+if ! dpkg -s gnupg &>/dev/null || ! dpkg -s ca-certificates &>/dev/null; then
+  echo "Installing gnupg and ca-certificates..."
+  sudo apt-get install -y gnupg ca-certificates
+else
+  echo "gnupg and ca-certificates are already installed."
+fi
+
+sudo apt install -y \
+    build-essential \
+    software-properties-common \
+    python3-launchpadlib \
+    neovim \
+    git \
+    fluxbox \
+    xdm \
+    rxvt-unicode \
+    fonts-dejavu-core \
+    curl \
+    unzip \
+    jq \
+    shellcheck \
+    shfmt \
+    imagemagick \
+    cmake \
+    dos2unix \
+    ripgrep \
+    clangd \
+    systemd-zram-generator \
+    util-linux \
+    iwd \
+    iwgtk \
+    gnome-keyring \
+    scrot \
+    inkscape \
+    mlterm \
+    libsixel-bin \
+    fetchmail \
+    procmail \
+    html2text \
+    fakeroot \
+    libncurses-dev \
+    libssl-dev \
+    ccache \
+    flex \
+    bison \
+    libelf-dev \
+    bc \
+    kmod \
+    cpio \
+    dwarves
+
+# ccache
+mkdir -p "$HOME/.local/bin"
+for cmd in gcc g++ cc c++ clang clang++; do
+  if [ -L "$HOME/.local/bin/$cmd" ]; then
+    echo "✔ Symlink exists: $HOME/.local/bin/$cmd"
+  elif [ -e "$HOME/.local/bin/$cmd" ]; then
+    echo "⚠ Exists but not a symlink: $HOME/.local/bin/$cmd (skipping)"
+  else
+    ln -s /usr/bin/ccache "$HOME/.local/bin/$cmd"
+    echo "➕Linked: $HOME/.local/bin/$cmd → /usr/bin/ccache"
+  fi
+done
+
+if ! has tgpt; then
+  curl -sSL https://raw.githubusercontent.com/aandrew-me/tgpt/main/install | sudo bash -s /usr/local/bin
+fi
+
+sudo update-alternatives --install \
+	/usr/bin/vim vim /usr/bin/nvim 60
+
+if ! has google-chrome; then
+  debpath=$(download https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb)
+  sudo apt install -y "$debpath" 
+fi
+
+fc-list | grep -qi "IosevkaTerm Nerd Font" || {
+  gitclone https://github.com/Iosevka-NerdFont/IosevkaTerm ~/.local/src/IosevkaTerm
+  mkdir -p ~/.local/share/fonts
+  find ~/.local/src/IosevkaTerm -iname "*.ttf" -exec cp -u {} ~/.local/share/fonts/ \;
+  fc-cache -f ~/.local/share/fonts
+}
+
+pactl info 2>/dev/null | grep -q "Server Name: PulseAudio (on PipeWire" || {
+
+  echo "Switching from PulseAudio to PipeWire with Bluetooth support..."
+
+  systemctl --user stop pulseaudio.service pulseaudio.socket || true
+  systemctl --user disable pulseaudio.service pulseaudio.socket || true
+  sudo apt remove --purge pulseaudio -y
+  sudo apt install -y pipewire pipewire-audio-client-libraries pipewire-pulse wireplumber libspa-0.2-bluetooth
+  systemctl --user enable --now pipewire.service pipewire-pulse.service wireplumber.service
+}
+
+command -v nvidia-smi >/dev/null || {
+  echo "Installing legacy NVIDIA driver..."
+
+  # Blacklist Nouveau
+  echo -e "blacklist nouveau\noptions nouveau modeset=0" | sudo tee /etc/modprobe.d/disable-nouveau.conf
+  sudo update-initramfs -u
+
+  # Install driver packages from local repo
+  sudo apt install -y "$ROOT_DIR"/kernel/nvidia/*.deb
+}
+
+disable-service \
+  mpd e2scrub_reap exim4 cups-browsed \
+  udisks2 ModemManager blueman-mechanism
+
+enable-service bluetooth iwd
+
+sudo rm -f /etc/iwd/main.conf
+sudo mkdir -p /etc/iwd
+sudo cp "$ROOT_DIR"/etc/iwd/main.conf /etc/iwd/main.conf
+sudo tee /etc/resolv.conf > /dev/null <<EOF
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+EOF
+
+sudo cp "$ROOT_DIR"/etc/systemd/journald.conf /etc/systemd/journald.conf
+
+[ ! -f /etc/systemd/zram-generator.conf.d/swap.conf ] && {
+  sudo mkdir -p /etc/systemd/zram-generator.conf.d
+  sudo tee /etc/systemd/zram-generator.conf.d/swap.conf > /dev/null <<EOF
+[zram0]
+zram-size = ram
+compression-algorithm = zstd
+EOF
+  sudo systemctl daemon-reexec
+  sudo systemctl start /dev/zram0
+}
+
+for part in /dev/sda?; do
+  [ -b "$part" ] || continue
+  [ "$(lsblk -no FSTYPE "$part")" = "ext4" ] || continue
+
+  sudo tune2fs -l "$part" | grep -q 'dir_index' || sudo tune2fs -O dir_index "$part"
+  sudo tune2fs -l "$part" | grep -q 'journal_data_writeback' || sudo tune2fs -o journal_data_writeback "$part"
+done
+
+for part in /dev/sda?; do
+  [ -b "$part" ] || continue
+  [ "$(lsblk -no FSTYPE "$part")" = "ext4" ] || continue
+  uuid=$(blkid -s UUID -o value "$part") || continue
+  grep -q "UUID=$uuid" /etc/fstab || continue
+
+  opts=()
+  grep -q "UUID=$uuid.*noatime"   /etc/fstab || opts+=("noatime")
+  grep -q "UUID=$uuid.*lazytime"  /etc/fstab || opts+=("lazytime")
+  grep -q "UUID=$uuid.*commit=60" /etc/fstab || opts+=("commit=60")
+
+  [ "${#opts[@]}" -eq 0 ] && continue
+
+  sudo cp /etc/fstab "/etc/fstab.bak.$(date +%F-%H%M)"
+  IFS=, read -r before after <<<"$(grep "UUID=$uuid" /etc/fstab | awk '{print $4}')"
+  new_opts="defaults,$before,$(IFS=,; echo "${opts[*]}")"
+  sudo sed -i "/UUID=$uuid/ s/defaults[^[:space:]]*/$new_opts/" /etc/fstab
+done
+
+
+# purge last cause we might break the system before the script finishes e.g. network
+for pkg in lightdm xfce4 colord network-manager; do
+  if dpkg -s "$pkg" &>/dev/null; then
+    sudo apt purge -y "$pkg"
+  fi
+done
+
+if dpkg -l | grep -q '^ii  xfce4-'; then
+  sudo apt purge -y xfce4-*
+fi
+
+if dpkg -l | grep -q '^ii  ibus'; then
+  sudo apt purge -y $(dpkg -l 'ibus*' | awk '/^ii/ {print $2}')
+fi
+
+sudo apt autoremove -y --purge
+

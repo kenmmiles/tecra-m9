@@ -1,0 +1,26 @@
+#!/bin/bash
+
+set -e
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+source "$ROOT_DIR/profile"
+CFG_DIR="${ROOT_DIR}/kernel/config"
+CFG_CURRENT="${CFG_DIR}/current"
+
+# Extract current local version from config
+localver=$(grep '^CONFIG_LOCALVERSION=' "$CFG_CURRENT" | cut -d'"' -f2)
+patch=${localver##*-}
+[[ "$patch" =~ ^[0-9]+$ ]] && next_patch=$((patch + 1)) || next_patch=1
+new_local="-${next_patch}"
+
+# Archive current config with version
+archive="${CFG_DIR}/${KVER}${localver}.conf"
+echo "Archiving: $archive"
+cp "$CFG_CURRENT" "$archive"
+
+# Update the current config
+echo "Updating local version to: $new_local"
+sed -i "s/^CONFIG_LOCALVERSION=\".*\"/CONFIG_LOCALVERSION=\"$new_local\"/" "$CFG_CURRENT"
+
+echo "Done. New version: ${KVER}${new_local}"
+

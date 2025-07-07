@@ -1,0 +1,51 @@
+Kernel Version: 6.1.0-37-amd64
+Version Label:  v6-1-0-37-amd64
+Uptime: up 13 hours, 10 minutes
+
+Kernel Path: /boot/vmlinuz-6.1.0-37-amd64
+Kernel Size: 7.9M
+
+Module Count: 4026
+Module Tree Size: 409M
+
+ZRAM Algorithm: lzo lzo-rle lz4 lz4hc [zstd] 
+ZRAM Usage: /dev/zram0                              partition	1980412		379392		100
+
+Kernel Cmdline: BOOT_IMAGE=/boot/vmlinuz-6.1.0-37-amd64 root=UUID=1ccac1cf-3aed-42cb-a697-1b5a614dd697 ro quiet splash
+
+Built-in Features: 2418
+=== Memory Footprint After Stack Initialization ===
+Used: 1.4Gi / 1.9Gi
+
+
+=== Top Memory Consumers ===
+    PID COMMAND           RSS
+   7461 chrome          684092
+   9313 chrome          214216
+   9375 chrome          203824
+   4837 chrome          199864
+   4880 chrome          124052
+   9330 chrome          108688
+   4927 chrome          82792
+   4883 chrome          75680
+   9898 chrome          68560
+
+Active Services:
+  bluetooth.service           loaded active running Bluetooth service
+
+=== SystemD Analyze ===
+Startup finished in 7.152s (kernel) + 16.509s (userspace) = 23.662s 
+graphical.target reached after 16.448s in userspace.
+
+=== SystemD Analyze (blame top 10) ===
+7.059s dev-sda5.device
+6.179s systemd-journal-flush.service
+4.173s man-db.service
+2.693s apt-daily-upgrade.service
+2.656s nvidia-persistenced.service
+2.632s apt-daily.service
+2.418s avahi-daemon.service
+2.337s bluetooth.service
+2.293s iwd.service
+2.286s systemd-logind.service
+

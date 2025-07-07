@@ -1,4 +1,19 @@
+# Goal
+
+A kernel and userland tailored to work most effectively and efficiently
+with the tecra m9, and particularly the limitations of low RAM and
+spinning rust.
+
+# TODO
+
+Revist old dotfiles configurations and move it all here. The idea is
+to build a new workflow around this old hardware.
+
 #  System information
+
+```bash
+inxi -Fzxx -C -I -S -G -d -m -E
+```
 
 System:
   Kernel: 6.1.0-37-amd64 arch: x86_64 bits: 64 compiler: gcc v: 12.2.0

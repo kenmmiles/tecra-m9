@@ -1,0 +1,3 @@
+#!/bin/bash
+
+flatpak run --env=LIBGL_ALWAYS_INDIRECT=1 com.github.PintaProject.Pinta

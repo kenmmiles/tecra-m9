@@ -1,0 +1,6 @@
+URxvt*scrollBar: false
+URxvt*background: black
+URxvt*foreground: lightgray
+URxvt*font: xft:IosevkaTerm Nerd Font:size=18,xft:DejaVu Sans Mono:size=18
+URxvt*imLocale: en_US.UTF-8
+

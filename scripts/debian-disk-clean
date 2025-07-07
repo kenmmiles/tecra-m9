@@ -1,0 +1,50 @@
+#!/bin/bash
+# system-clean.sh — Disk cleanup with summary and conditional deborphan
+
+set -e
+
+start_space=$(df --output=used / | tail -1)
+
+echo "==> Starting cleanup..."
+
+echo "[1/6] Cleaning apt caches and unused packages..."
+sudo apt clean
+sudo apt autoclean
+sudo apt autoremove --purge -y
+
+echo "[2/6] Removing orphaned packages (if deborphan is installed)..."
+if command -v deborphan &> /dev/null; then
+    orphans=$(deborphan)
+    if [ -n "$orphans" ]; then
+        echo "$orphans" | xargs sudo apt-get -y remove --purge
+    else
+        echo "No orphaned packages found."
+    fi
+else
+    echo "deborphan not found — skipping orphan check."
+fi
+
+echo "[3/6] Vacuuming journal logs..."
+sudo journalctl --vacuum-time=5d
+
+echo "[4/6] Clearing thumbnails, trash, and temp files..."
+rm -rf ~/.cache/thumbnails/*
+rm -rf ~/.local/share/Trash/*
+sudo rm -rf /tmp/*
+
+echo "[5/6] Cleaning logrotate archives..."
+sudo logrotate -f /etc/logrotate.conf
+
+end_space=$(df --output=used / | tail -1)
+freed_kb=$((start_space - end_space))
+freed_mb=$((freed_kb / 1024))
+
+echo "[6/6] Cleanup complete."
+echo
+echo "📊 Summary:"
+echo "-----------------------------------"
+echo " Space before : $((start_space / 1024)) MB"
+echo " Space after  : $((end_space / 1024)) MB"
+echo " Freed        : ${freed_mb} MB"
+echo "-----------------------------------"
+
