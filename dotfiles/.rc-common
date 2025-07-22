@@ -1,0 +1,1192 @@
+#!/bin/bash
+################################################################################
+# data
+###############################################################################
+
+# log levels
+declare -A lls
+lls[debug]=10
+lls[info]=20
+lls[warn]=30
+lls[error]=40
+
+# paths
+declare -A paths
+paths[downloads]="$HOME/Downloads"
+paths[local]="$HOME/.local"
+paths[cargo]="$HOME/.cargo"
+paths[bun]="$HOME/.bun"
+paths[src]="${paths[local]}/src"
+paths[bin]="${paths[local]}/bin"
+paths[zig]="${paths[local]}/zig"
+paths[go]="${paths[local]}/go"
+paths[fnm]="${paths[local]}/share/fnm"
+paths[nvim]="${paths[local]}/nvim"
+paths[texlive]="/usr/local/texlive/2025/bin/x86_64-linux"
+paths[copilot]="${paths[local]}/copilot"
+
+# urls
+declare -A urls
+urls[nord-dircolors]="https://github.com/arcticicestudio/nord-dircolors"
+urls[nord-tmux]="https://github.com/arcticicestudio/nord-tmux"
+urls[nord-vim]="https://github.com/arcticicestudio/nord-vim"
+urls[ale]="https://github.com/dense-analysis/ale.git"
+#urls[zig]="https://ziglang.org/builds/zig-linux-x86_64-0.14.0-dev.2802+257054a14.tar.xz"
+urls[zig]="https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz"
+urls[nvim]="https://github.com/neovim/neovim/releases/download/stable/nvim-linux-x86_64.tar.gz"
+urls[kickstart]="https://github.com/kenmmiles/kickstart.nvim.git"
+
+# ubuntu packages
+ubuntu_packages=( \
+  ca-certificates build-essential automake pkg-config \
+  yacc bash zsh procps git curl unzip bc jq python3 \
+  python3-pip python-is-python3 tmux shellcheck shfmt \
+  eza podman podman-docker imagemagick \
+  slirp4netns cmake meson util-linux libncurses-dev \
+  libevent-dev qemu-utils btrfs-progs ntfs-3g exfat-fuse \
+  exfatprogs dosfstools dos2unix uidmap ripgrep clangd \
+)
+
+# azure packages
+azure_packages=( ca-certificates procps vim vim-extra unzip bc git tmux )
+
+################################################################################
+# logging functions
+###############################################################################
+ldbg () {
+  if ((LOG_LEVEL <= lls[debug])); then
+    local origin="${FUNCNAME[1]:-$SHELL}"
+    printf >&2 'DEBUG: [%s] %s\n' "$origin" "$*"
+  fi
+}
+
+linfo() {
+  if ((LOG_LEVEL <= lls[info])); then
+    printf >&2 '%s\n' "$*"
+  fi
+}
+
+lwarn() {
+  if ((LOG_LEVEL <= lls[warn])); then
+    local origin="${FUNCNAME[1]:-$SHELL}"
+    printf >&2 'WARNING: [%s] %s\n' "$origin" "$*"
+  fi
+}
+
+lerr() {
+  if ((LOG_LEVEL <= lls[error])); then
+    local origin="${FUNCNAME[1]:-$SHELL}"
+    printf >&2 'ERROR: [%s] %s\n' "$origin" "$*"
+  fi
+}
+
+################################################################################
+# check-os <ID>
+# <ID> is a string e.g. "ubuntu", "azurelinux", etc
+################################################################################
+# shellcheck source=/dev/null
+check-os() { ( source /etc/os-release [ "$ID" == "$1" ] ; ) }
+is-ubuntu() { check-os "ubuntu" ; }
+is-azure() { check-os "azurelinux" ; }
+
+################################################################################
+# print if using uefi or bios
+################################################################################
+uefi-or-bios() {
+  [ -d /sys/firmware/efi ] && echo 'UEFI' || echo 'Legacy BIOS/CSM'
+}
+
+################################################################################
+# is-interactive-shell
+################################################################################
+is-interactive-shell() {
+  case $- in
+    *i*) return 0 ;;  # Interactive shell
+    *) return 1 ;;    # Non-interactive shell
+  esac
+}
+
+################################################################################
+# has <command>
+################################################################################
+has() { type "$1" &> /dev/null ; } 
+
+################################################################################
+# a poor mans `duh`: prints directories using the most space
+################################################################################
+disk-space() {
+  #du -hax "${1:-/}" 2> /dev/null | sort -nr | head -n 30
+  printf "Checking %s...\n" "$(realpath -s "${1:-.}")"
+  (cd "${1:-.}" && du -Lhsx ./* 2> /dev/null | sort -rh | head -20)
+}
+
+################################################################################
+# trash <file/dir>'s
+#
+# Move <file/dir>'s to $HOME/Trash
+################################################################################
+trash() {
+  local trash_dir="$HOME/Trash"
+  mkdir -p "$trash_dir" && mv -b -t "$trash_dir" -- "$@"
+}
+
+################################################################################
+# lastarg <arguments>
+################################################################################
+lastarg() { for i in "$@"; do :; done; printf '%s\n' "${i:-}" ; }
+
+################################################################################
+# passgen [length]
+#
+# generate password 
+################################################################################
+passgen() {
+  tr -dc "a-zA-Z0-9\!%^&;:" < /dev/urandom | fold -w "${1:-16}" | head -n 1
+}
+
+################################################################################
+# Usage: trim <string>
+#
+# Prints string with leading/trailing whitespace removed
+################################################################################
+trim() {
+  local str="$*"
+  str="${str#"${str%%[![:space:]]*}"}"
+  str="${str%"${str##*[![:space:]]}"}"
+  printf '%s' "$str"
+}
+
+################################################################################
+# is-url <string>
+#
+# test if <string> is a url
+################################################################################
+is-url() {
+  regex='(https?|ftp|file)://[-[:alnum:]\+&@#/%?=~_|!:,.;]*[-[:alnum:]\+&@#/%=~_|]'
+  [[ $1 =~ $regex ]]
+}
+
+################################################################################
+# Usage: has-extlen <path>
+#
+# Returns success if <path> includes the Extended Length Prefix.
+# <https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file>
+################################################################################
+has-extlen() { local s="${1:-}"; [[ "${s:0:4}" == "\\\\?\\" ]] ; }
+
+################################################################################
+# Usage: strip-extlen <path>
+#
+# Prints <path>, omitting the Extended Length Prefix if one exists.
+################################################################################
+strip-extlen() {
+  local path="${1:-}"
+  if has-extlen "$path"; then
+    printf '%s\n' "${path:4}"
+  else
+    printf '%s\n' "$path"
+  fi
+}
+
+################################################################################
+# Usage: add-extlen <path>
+#
+# Prints <path>, adding the Extended Length Prefix if none exists.
+################################################################################
+add-extlen() {
+  local path="${1:-}"
+  if has-extlen "$path" || is-unc "$path"; then
+    printf '%s\n' "$path"
+  else
+    printf '%s\n' "\\\\?\\$path"
+  fi
+}
+
+################################################################################
+# Usage: is-unc <path>
+#
+# Returns success if <path> is a UNC path e.g. `\\somemachine\file.txt`
+################################################################################
+# shellcheck disable=SC1003
+is-unc() { ! has-extlen "$@" && [[ "${1:0:2}" == '\\' ]]; }
+
+################################################################################
+# Usage: tilde <path>
+#
+# Prints <path>, expanding the `~` character to `$HOME`
+################################################################################
+tilde() {
+  local path="${1:-}"
+  [[ -n "$path" ]] || return 1
+  [[ -n "${HOME:-/root}" ]] || return 1
+  # FIXME: doesn't handle ~user
+
+  if [[ $path =~ ^~ ]]; then
+    printf '%s\n' "${HOME:-/root}${path:1}"
+  else
+    printf '%s\n' "$path"
+  fi
+}
+
+################################################################################
+# Usage: is-winpath <path>
+#
+# Returns success if <path> is a Windows path.
+################################################################################
+is-winpath() {
+  local path="${1:-}"
+  [[ -n "$path" ]] || return 1
+  has-extlen "$path" \
+    || [[ $path =~ ^[a-zA-Z]:\\ ]] \
+    || [[ $path =~ ^\.\\ ]]
+}
+
+################################################################################
+# Usage: array::sort <params>
+#
+# Prints each parameter in sorted order
+################################################################################
+array::sort() { printf '%s\n' "$@" | LC_ALL=C sort; }
+
+################################################################################
+# Usage: array::diff <array1> <array2>
+#
+# Prints elements that exist in array2, which do not exist in array1.
+# Arrays are passed by name.
+#
+# readarray -t array1 < <(somecmd)
+# readarray -t array2 < <(somecmd)
+# printf '%s\n' "$(array::diff array1 array2)"
+#
+################################################################################
+array::diff() {
+  local -n arr1=$1
+  local -n arr2=$2
+  comm -13 <(array::sort "${arr1[@]}") <(array::sort "${arr2[@]}")
+}
+
+################################################################################
+# Usage: ini::is_section <line>
+#
+# Return success if <line> is a section, and print it's name
+################################################################################
+ini::is_section() {
+  local line="${1:-}"
+  local len="${#line}"
+  if [[ "${line:0:1}" == "[" ]] && [[ "${line:$((len - 1)):1}" == "]" ]]; then
+    printf '%s\n' "${line:1:$((len - 2))}"
+    return 0
+  fi
+  return 1
+}
+
+################################################################################
+# Usage: ini::read_section <output> <section> <file>
+#
+# Read values from <section> of <file> and store into <output>
+# <output> is a name reference to an associative array
+################################################################################
+ini::read_section() {
+  local -n output=${1:-}
+  local section=${2:-}
+  [[ -n "$section" ]] || return 1
+  local file=${3:-}
+  [[ -n "$file" ]] || return 2
+  [[ -f "$file" ]] || return 3
+
+  local found=false
+  while read -r line; do
+    # skip blank lines
+    [[ -n "$line" ]] || continue
+
+    # is this our target section? sections names are vhd's, so convert
+    # each end to unix to normalize the test (so vhd's can be referenced
+    # by any path format)
+    if [[ "$(unixpath "$(ini::is_section "$line")")" == \
+      "$(unixpath "$section")" ]]; then
+      # we found our target section
+      output['section']="$(trim "$section")"
+      found=true
+      continue
+    elif $found && ini::is_section "$line" >/dev/null; then
+      # we hit another section after finding ours. so we're done.
+      return 0
+    elif $found; then
+      # we're in a line in our target section. so assign key and value.
+      local key value
+      key=$(cut -d'=' -f 1 <<<"$line")
+      value=$(cut -d'=' -f 2 <<<"$line")
+      # shellcheck disable=SC2034
+      output[$(trim "$key")]="$(trim "$value")"
+      continue
+    fi
+  done <"$file"
+
+  # success if we found our section, otherwise error
+  if ! $found; then
+    return 1
+  fi
+}
+
+################################################################################
+# ini::list_sections <inifile>
+#
+# Print name of each ini section in <inifile>
+################################################################################
+ini::list_sections() {
+  local file=${1:-}
+  [[ -n "$file" ]] || return 1 
+  [[ -f "$file" ]] || return 2
+
+  local section
+  while read -r line; do
+    if section=$(ini::is_section "$line"); then
+      printf '%s\n' "$section"
+    fi
+  done <"$file"
+}
+
+################################################################################
+# Usage: winpath [options] <path>
+#
+# Prints path, converting it to Windows format.
+#
+# [options]
+#
+# -a  Convert path to absolute
+# -e  Add the Extended Length Prefix
+################################################################################
+winpath() {
+  local OPTIND absolute=false extlen=false
+  while getopts 'ae' flag; do
+    case "${flag}" in
+      a) absolute=true ;;
+      e) extlen=true ;;
+      *)
+        return 1
+        ;;
+    esac
+  done
+
+  shift $((OPTIND - 1))
+  local path="${1:-}"
+  if [[ -z "$path" ]]; then
+    return 1
+  fi
+  shift 1
+
+  if ! is-winpath "$path"; then
+    path="$(tilde "$path")"
+    if $absolute; then
+      path="$(wslpath -wa "$path")"
+    else
+      path="$(wslpath -w "$path")"
+    fi
+  fi
+
+  if $extlen; then
+    path="$(add-extlen "$path")"
+  else
+    path="$(strip-extlen "$path")"
+  fi
+
+  printf '%s\n' "$path"
+}
+
+################################################################################
+# Usage: unixpath [options] <path>
+#
+# Prints <path>, converting it to "unix" format.
+#
+# [options]
+#
+# -a  Convert path to absolute
+# -e  Add the Extended Length Prefix
+################################################################################
+unixpath() {
+  local OPTIND absolute=false
+  while getopts 'a' flag; do
+    case "${flag}" in
+      a) absolute=true ;;
+      *)
+        return 1
+        ;;
+    esac
+  done
+
+  shift $((OPTIND - 1))
+  local path="${1:-}"
+  if [[ -z "$path" ]]; then
+    return 1
+  fi
+  shift 1
+
+  if is-winpath "$path"; then
+    path=$(wslpath -u "$(strip-extlen "$path")")
+  else
+    path="$(tilde "$path")"
+  fi
+
+  if $absolute; then path="$(realpath -sm "$path")"; fi
+
+  printf '%s\n' "$path"
+}
+
+################################################################################
+# Usage: filesystems
+#
+# Print supported filesystems, one per line.
+################################################################################
+filesystems() {
+  gen() {
+    while read -ra vals; do
+      [[ "${vals[0]}" == "nodev" ]] && continue
+      if PATH=/sbin:/usr/sbin command -v "mkfs.${vals[0]}" >/dev/null 2>&1; then
+        linfo "using mkfs.${vals[0]}"
+        printf '%s\n' "${vals[0]}"
+      else
+        linfo "mkfs.${vals[0]} not found (package not installed?)"
+      fi
+    done </proc/filesystems
+
+    # fuse drivers
+    for fs in ntfs exfat-fuse; do
+      if PATH=/sbin:/usr/sbin command -v "mount.$fs" >/dev/null 2>&1; then
+        linfo "using mount.$fs"
+        if [[ "$fs" == "exfat-fuse" ]]; then
+          printf 'exfat\n'
+        else
+          printf '%s\n' "$fs"
+        fi
+      else
+        linfo "mount.$fs not found (package not installed?)"
+      fi
+    done
+  }
+  gen | sort -d
+}
+
+################################################################################
+# Usage: is-mounted <path>
+#
+# Return success if <path> is mounted. If there's an associated device,
+# print the path to it
+################################################################################
+is-mounted() {
+  local mountpoint
+  mountpoint="${1:-}"; [[ -n "$mountpoint" ]] || return 1
+
+  local source_value
+  source_value=$(findmnt -n -f --output SOURCE "$mountpoint") || return 1
+
+  if [[ "${source_value:0:4}" == "/dev" ]]; then
+    printf '%s\n' "$source_value"
+  fi
+}
+
+################################################################################
+# Create a symlink
+# Arguments:
+#   src
+#   dest
+# Returns:
+#   1 on bad input
+################################################################################
+symlink() {
+  local src dest backup
+
+  src="${1:-}"
+  dest="${2:-}"
+  [[ -n "$src" && -n "$dest" ]] || return 1
+
+  # convert paths to absolute
+  src="$(realpath -sm "$src")"
+  dest="$(realpath -sm "$dest")"
+
+  if [[ -f "$dest" && ! -h "$dest" ]]; then
+    # destination exists and isn't a link; rename it.
+    backup="$(dirname "$dest")/$(basename "$dest").$(date '+%s')"
+    linfo "Renaming file $dest -> $backup"
+    mv -f "$dest" "$backup"
+  elif [[ ! -e "$dest" ]]; then
+    # destination exists and is a broken symlink; remove it.
+    ldbg "$dest exists and is broken"
+    rm -f "$dest"
+  else
+    ldbg "do nothing for $dest"
+  fi
+
+  # if the link doesn't exist, create it
+  if [[ ! -h "$dest" ]]; then
+    ldbg "Symlinking $src -> $dest"
+    mkdir -vp "$(dirname "$dest")"
+    ln -bsf "$src" "$dest"
+  fi
+}
+
+################################################################################
+# gitclone <url> [base directory]
+#
+# Outputs:
+#   Absolute path of cloned directory on success
+# Returns:
+#   1 on error
+################################################################################
+gitclone() {
+  local repo_url base_dir dest_dir
+
+  repo_url="${1:-}"
+  [[ -n "$repo_url" ]] || return 1
+
+  base_dir="${2:-}"
+  if [[ -z "$base_dir" ]]; then
+    base_dir="${paths[src]}"
+  fi
+  [[ -n "$base_dir" ]] || return 1
+
+  dest_dir="$base_dir/$(basename "$repo_url" .git)"
+  if [[ -d "$dest_dir/.git" ]]; then
+    linfo "already exists: $dest_dir ($repo_url)"
+    printf '%s\n' "$(realpath -sm "$dest_dir")"
+  elif [[ ! -d "$dest_dir" ]]; then
+    linfo "repo doesn't exist, cloning: $dest_dir ($repo_url)"
+    mkdir -p "$base_dir" && \
+      git clone --depth 1 "$repo_url" "$dest_dir"
+      printf '%s\n' "$(realpath -sm "$dest_dir")"
+  fi
+}
+
+################################################################################
+# download <url>
+#
+# Outputs:
+#   Absolute path of downloaded file on success
+# Returns:
+#   1 on error
+################################################################################
+download() {
+  local url filename filepath
+
+  url="${1:-}"; [[ -n "$url" ]] || return 1
+  filename="$(basename "$url")"; [[ -n "$filename" ]] || return 1
+  filepath="${paths[downloads]}/$filename"
+
+  if [[ ! -f "$filepath" ]]; then
+    mkdir -p "${paths[downloads]}"
+    curl -fL -o "$filepath" "$url" || return 1
+  fi
+
+  printf '%s\n' "$filepath"
+}
+
+################################################################################
+# find-up [filename]
+#
+# test existence of [filename], traversing up from CWD.
+# on match print path and return, else return 1.
+#
+# FIXME: Change [filename] to [filenames...] and allow searching for multiple
+# file types. Then get rid of find-container-file.
+################################################################################
+find-up() {
+  local filename="${1:-.git}"
+
+  source_path="$(realpath -sm .)" || return 1
+  while [[ "${source_path}" != "/" ]]; do
+    linfo "Looking for $source_path/$filename"
+    if [[ -e "${source_path}/$filename" ]]; then
+      printf '%s\n' "$source_path"
+      return 0
+    fi
+    source_path="$(dirname "$source_path")"
+  done
+  linfo "Couldn't find $filename"
+  return 1
+}
+
+################################################################################
+# find_container_file [directory]
+#
+# XXX: stupid version of the above, replace it.
+################################################################################
+find_container_file() {
+  local source_path="${1:-.}"
+  source_path="$(realpath -sm "$source_path")"
+  if [[ ! -d "$source_path" ]]; then
+    return 1
+  fi
+
+  while [[ "$source_path" != "/" ]]; do
+    if [[ -f "$source_path"/Dockerfile ]]; then
+      printf '%s/Dockerfile\n' "$source_path"
+      return 0
+    elif [[ -f "$source_path"/Containerfile ]]; then
+      printf '%s/Containerfile\n' "$source_path"
+      return 0
+    else
+      source_path="$(dirname "$source_path")"
+    fi
+  done
+
+  return 1
+}
+
+focker_run() {
+  local exe
+  if command -v "podman" > /dev/null; then
+    exe="podman"
+    rundir="/run/user/$(id -u)"
+    if [[ ! -d "$rundir" ]]; then
+      warn "Creating missing $rundir"
+      sudo mkdir -p "$rundir" 
+      sudo chown "$(id -un):$(id -gn)" "$rundir"
+    fi
+  elif command -v "docker" > /dev/null; then
+    exe="docker"
+  else 
+    return 1
+  fi
+
+  args=("$@")
+  1>&2 printf 'Executing: %s %s\n' "$exe" "${args[*]}"
+  $exe "${args[@]}"
+}
+
+focker() {
+  # parse args...i know
+  local args _lastarg container_file container_root cmd
+  args=("$@")
+  _lastarg="$(lastarg "${args[@]}")"
+  if [[ -n "$_lastarg" ]] && [[ -f "$_lastarg" ]]; then
+    # last arg is a file
+    container_file="$(realpath -sm "$_lastarg")"
+    unset "args[${#args[@]}-1]"
+  elif [[ -n "$_lastarg" ]] && [[ -d "$_lastarg" ]]; then
+    # last arg is a dir
+    container_file="$(find_container_file "$_lastarg")"
+    unset "args[${#args[@]}-1]"
+  else
+    container_file="$(find_container_file)"
+  fi
+  container_root="$(dirname "$container_file")"
+  cmd="${args[0]:-build}"
+  unset "args[0]"
+
+
+  # determine tag name.
+  # if container_file is named `Containerfile.something` then `something` will be added to the tag
+  # e.g. myproject:something
+  local tag_name
+  tag_name="$(basename "$container_root")"
+  x=$(basename "$container_file" | cut -s -d. -f 2)
+  if [[ -n "$x" ]]; then
+    tag_name="${tag_name}:${x}"
+  fi
+
+  #printf 'x=%s, container_root=%s, container_file=%s, tag_name=%s\n' "$x" "$container_root" "$container_file" "$tag_name"
+  #exit 1
+
+  case "${cmd}" in
+    "build")
+      args=("-f" "$container_file" "${args[@]}")
+      focker_run "build" "${args[@]}" "-t" "$tag_name" "."
+      ;;
+    "run")
+      focker_run "run" "${args[@]}" "-v" "$container_root:/mnt" \
+        "--rm" "--name" "$tag_name" "$tag_name"
+      ;;
+    "shell")
+      focker_run "run" "${args[@]}" "-v" "$container_root:/mnt" \
+        "-it" "--rm" "$tag_name" "sh"
+      ;;
+    "bash")
+      focker_run "run" "${args[@]}" "-it" "--rm" "--entrypoint" "/bin/bash" "$tag_name"
+      ;;
+    "ls"|"list")
+      focker_run "container" "list" "--all" "--external"
+      ;;
+    "export")
+      focker_run "container" "rm" "$tag_name"
+      focker_run "run" "--name" "$tag_name" "$tag_name"
+      focker_run "export" "--output" "${tag_name}-rootfs.tar" "$tag_name" 
+      ;;
+    "wslexport")
+      rm -rf "${tag_name}-wsl"
+      mkdir -p "${tag_name}-wsl"
+      focker_run "container" "rm" "$tag_name" || :
+      focker_run "run" "--name" "$tag_name" "$tag_name"
+      focker_run "export" "--output" "${tag_name}-wsl/rootfs.tar" "$tag_name" 
+      print_wsl_bat "$tag_name" > "${tag_name}-wsl/install.bat"
+      ;;
+    "mrproper")
+      focker_run "container" "list" "--all" "--external" | \
+        while read -r line; do
+          id="$(echo "$line" | awk '{print $1}')"
+          if [[ -n "$id" ]] && [[ "$id" != "CONTAINER" ]]; then
+            focker_run "container" "rm" "-f" "$id"
+          fi
+        done
+      focker_run "system" "reset" "-f"
+      if [[ -d "$HOME/.cache/podman" ]]; then
+        rm -rf "$HOME/.cache/podman"
+        mkdir -p "$HOME/.cache/podman"
+      fi
+      ;;
+    *)
+      printf '%s is not a valid command\n' "$cmd"
+      printf 'Usage: %s [command [podman args]] [Containerfile]\n\n' \
+        "$(basename "$0")"
+      printf '[command]\tAvailable options: "build", "run", "shell"\n'
+      printf '\t\tDefault option: "shell"\n'
+      return 1
+      ;;
+  esac
+}
+
+################################################################################
+# ytmp3 <url>
+#
+# Convert youtube link to an mp3 in the CWD
+################################################################################
+ytmp3() {
+  url="${1:-}"
+  if [[ -z "$url" ]]; then
+    printf 'Usage: ytmp3 <youtubeurl>\n\n'
+    printf 'convert youtube video to mp3\n'
+    return 1
+  fi
+
+  yt-dlp \
+    --extract-audio \
+    --audio-format "mp3" \
+    --restrict-filenames \
+    --output "%(title)s.%(ext)s" \
+    "$url"
+}
+
+################################################################################
+# ytwav <url>
+#
+# Convert youtube link to a wav in the CWD
+################################################################################
+ytwav() {
+  url="${1:-}"
+  if [[ -z "$url" ]]; then
+    echo "Usage: ytwav <youtubeurl>"
+    echo ""
+    echo "convert youtube video to wav"
+    return 1
+  fi
+
+  yt-dlp \
+    --extract-audio \
+    --audio-format "wav" \
+    --restrict-filenames \
+    --output "%(title)s.%(ext)s" \
+    "$url"
+}
+
+
+################################################################################
+# svg2rb
+################################################################################
+svg2rb() {
+  if [ "$#" -ne 1 ]; then
+    echo "Usage: svg2rb <input_file.svg>"
+    return 1
+  fi
+
+  input_file="$1"
+
+  # Check if the input file exists
+  if [ ! -f "$input_file" ]; then
+    echo "Error: File '$input_file' does not exist."
+    return 1
+  fi
+
+  # Check if ImageMagick's convert is installed
+  if ! command -v convert &> /dev/null; then
+    echo "Error: ImageMagick is not installed. Please install it to use this function."
+    return 1
+  fi
+
+  input_dir=$(dirname "$input_file")
+  base_name=$(basename "$input_file" .svg)
+  output_file="$input_dir/$base_name.png"
+
+  if ! convert "$input_file" -resize 5000x5000 "$output_file"; then
+      echo "Error: Conversion failed."
+      return 1
+  fi
+
+  echo "Conversion successful: $output_file created."
+}
+
+################################################################################
+# tex2pdf <texfile>
+#
+# export a pdf from <texfile> 
+################################################################################
+tex2pdf() {
+  local INPUT="${1:-}"
+  if [[ -z "$INPUT" ]]; then
+    echo "Usage: $0 <TEXFILE>"
+    echo ""
+    echo "Convert .tex to .pdf"
+    return 1
+  fi
+
+  if [[ ! -f "$INPUT" ]]; then
+    echo "No such file: $INPUT"
+    return 1
+  fi
+
+  local TEMPDIR
+  TEMPDIR="$(mktemp -d)"
+  cp "$INPUT" "$TEMPDIR"
+  pushd "$TEMPDIR" > /dev/null 2>&1 || return 1
+  pdflatex --interaction=nonstopmode "$(basename "$INPUT")" > /dev/null 2>&1
+  popd > /dev/null 2>&1 || return 1
+  mv "$TEMPDIR/*.pdf" .
+  rm -rf "$TEMPDIR"
+}
+
+################################################################################
+# wsl-fix
+################################################################################
+wsl-fix() {
+  local rundir
+
+  rundir="/run/user/$(id -u)"
+  if [[ ! -d "$rundir" ]]; then
+    lwarn "Creating missing $rundir"
+    sudo mkdir -p "$rundir" 
+    sudo chown "$(id -un):$(id -gn)" "$rundir"
+  fi
+}
+
+################################################################################
+# install dotfiles to $HOME
+################################################################################
+dotfiles-install() {
+  # create vimrc if it doesn't exist
+  if [[ ! -f "$HOME"/.vimrc ]]; then
+    linfo "creating .vimrc"
+    cat <<EOF > "$HOME/.vimrc"
+let g:is_bash = 1
+set visualbell
+set termguicolors
+
+syntax enable
+set laststatus=2
+set tabstop=4
+set softtabstop=2
+set shiftwidth=2
+set expandtab
+set backspace=2
+set modeline
+set clipboard=unnamedplus
+set nolist
+"set spell spelllang=en_us
+
+"  autocmd vimenter * ++nested colorscheme gruvbox
+if has('nvim')
+  colorscheme nord
+else
+  colorscheme desert
+endif
+
+" In ~/.vim/vimrc, or somewhere similar.
+let g:ale_linters = {
+\   'markdown': [],
+\}
+EOF
+  fi
+
+  # create init.vim if we have nvim installed but init.vim
+  if has "nvim" && [[ ! -f "$HOME/.config/nvim/init.vim" ]]; then
+    linfo "creating init.vim"
+    mkdir -p ~/.config/nvim
+    cat <<EOF > "$HOME/.config/nvim/init.vim"
+set runtimepath^=~/.vim runtimepath+=~/.vim/after
+let &packpath=&runtimepath
+source ~/.vimrc
+EOF
+  fi
+
+  # install ale for vim
+  ldbg "installing ale"
+  gitclone "${urls[ale]}" "$HOME/.vim/pack/git-plugins/start" > /dev/null
+
+  # install tmux plugins
+  local target_dir="$HOME/.tmux/plugins/tpm"
+  if [[ ! -d "$target_dir" ]]; then
+    linfo "installing tpm for tmux"
+    mkdir -p "$(dirname "$target_dir")"
+    git clone "${urls[tpm]}" "$target_dir"
+  fi
+
+  ldbg "run tpm install_plugins"
+  "$HOME"/.tmux/plugins/tpm/bin/install_plugins
+
+  if [[ ! -d "${paths[zig]}" ]]; then
+    linfo "installing zig to ${paths[zig]}"
+    local tar_path
+    tar_path="$(download "${urls[zig]}")"
+    mkdir -p "${paths[zig]}"
+    tar xf "$tar_path" --strip-components=1 -C "${paths[zig]}"
+  fi
+
+  ldbg "linking nord themes"
+  symlink \
+    "$(gitclone "${urls[nord-dircolors]}")/src/dir_colors" "$HOME/.dir_colors" 
+  symlink \
+    "$(gitclone "${urls[nord-tmux]}")/nord.tmux" "$HOME/.tmux/nord.tmux" 
+  symlink \
+    "$(gitclone "${urls[nord-vim]}")/colors/nord.vim" "$HOME/.vim/colors/nord.vim" 
+
+}
+
+################################################################################
+# install system level things i.e. things that need root
+################################################################################
+dotfiles-provision() {
+  local file="/etc/sudoers.d/$USER"
+  if [ ! -f "$file" ]; then
+    linfo "setting up passwordless sudo @ $file"
+    echo "$USER ALL=(ALL) NOPASSWD:ALL" | sudo tee "$file" > /dev/null
+    sudo chmod 440 "$file"
+  fi
+
+  if is-ubuntu; then
+    linfo "install ubuntu packages with apt"
+    sudo apt-get update -y && \
+    sudo apt-get upgrade -y && \
+    sudo apt-get install --no-install-recommends -y "${ubuntu_packages[@]}"
+  elif is-azure; then
+    linfo "install azure packages with tdnf"
+    sudo tdnf upgrade -y && \
+    sudo tdnf install -y "${azure_packages[@]}"
+  else
+    lwarn "unsupported system, skipping package installation"
+  fi
+}
+
+install-nvim() {
+  if ! has nvim; then
+    linfo "installing stable nvim into ${paths[nvim]}"
+    rm -rf "${paths[nvim]}"
+    mkdir -p "${paths[nvim]}"
+    tar \
+      --strip-components=1 \
+      -xf \
+      "$(download "${urls[nvim]}")" \
+      -C "${paths[nvim]}"
+  fi
+
+  kickstart_path="${XDG_CONFIG_HOME:-$HOME/.config}"/nvim
+  if [[ ! -d "$kickstart_path" ]]; then
+    linfo "cloning kickstart to $kickstart_path"
+    git clone "${urls[kickstart]}" "$kickstart_path"
+  fi
+
+  # TODO: can i replace `npm` with bun or whatever?
+  if ! npm list -g --depth 0 | grep bash-language-server; then
+    npm install -g bash-language-server
+  else
+    linfo "bash-language-server is already installed."
+  fi
+}
+
+clipfile() {
+  if [[ "$1" == "-" ]]; then
+    # Read from stdin and copy
+    cat - | xclip -selection clipboard
+  elif [[ -f "$1" ]]; then
+    # Read from file and copy
+    cat "$1" | xclip -selection clipboard
+  else
+    echo "Usage: copy_to_clipboard <filename>|-" >&2
+    return 1
+  fi
+}
+
+clippaste() {
+  xclip -selection primary -o
+}
+
+gemma() {
+  tgpt \
+    --provider "groq" \
+    --key "$(cat ~/Code/sunnygrove/docs/groq-api-key.txt)" \
+    --model "gemma2-9b-it" "$@"
+}
+
+gemma-m() { gemma -m ; }
+
+gemma-shell() { gemma -is ; }
+
+gemma-img() {
+  tgpt \
+    --provider "groq" \
+    --key "$(cat ~/Code/sunnygrove/docs/groq-api-key.txt)" \
+    --model "gemma2-9b-it" --img "$@"
+}
+
+imgselect() {
+    local img_dir="$1"
+
+    # Validate input
+    if [[ -z "$img_dir" ]]; then
+        echo "Usage: imgselect <img/dir/path|image>"
+        return 1
+    fi
+
+    # if it's one file, just print and copy to clipboard
+    if [[ -f "$img_dir" ]]; then
+        echo "$img_dir"
+        echo -n "$img_dir" | xclip -selection clipboard
+        return 0
+    fi
+
+    if [[ -z "$img_dir" || ! -d "$img_dir" ]]; then
+        echo "Usage: imgselect /path/to/image_directory"
+        return 1
+    fi
+
+    # Collect image files
+    local images=()
+    while IFS= read -r -d $'\0' file; do
+        images+=("$file")
+    done < <(find "$img_dir" -type f \( -iname "*.png" -o -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.webp" \) -print0)
+
+    if [[ ${#images[@]} -eq 0 ]]; then
+        echo "No images found in: $img_dir"
+        return 1
+    fi
+
+    # Use nsxiv in open-first-thumbnail mode
+    local selected
+    selected=$(nsxiv -oft "${images[@]}" | head -n 1)
+
+    if [[ -n "$selected" ]]; then
+        echo "$selected"
+        echo -n "$selected" | xclip -selection clipboard
+        return 0
+    else
+        echo "No image selected."
+        return 1
+    fi
+}
+
+################################################################################
+# main 
+################################################################################
+main() {
+  if [[ -z "$LOG_LEVEL" ]]; then
+    LOG_LEVEL=${lls[info]}
+  fi
+
+  for newpath in \
+    "/sbin" "/usr/sbin" \
+    "${paths[bin]}" "${paths[zig]}" \
+    "${paths[go]}" "${paths[cargo]}" "${paths[fnm]}" \
+    "${paths[texlive]}" "${paths[copilot]}" \
+    "${paths[bun]}/bin" "${paths[nvim]}"/bin ; \
+  do
+    PATH="$newpath:$PATH"
+  done
+
+  export BUN_INSTALL="${paths[bun]}"
+
+  # history
+  export HISTCONTROL=ignoredups:erasedups
+  export HISTSIZE=100000
+  export HISTFILESIZE=100000
+  export SAVEHIST=100000
+  # editor
+  export GIT_EDITOR=vim
+  export VISUAL=vim
+  export EDITOR=vim
+  # colors
+  export COLORTERM=truecolor
+  export LESS_TERMCAP_mb=$'\e[1;32m'
+  export LESS_TERMCAP_md=$'\e[1;32m'
+  export LESS_TERMCAP_me=$'\e[0m'
+  export LESS_TERMCAP_se=$'\e[0m'
+  export LESS_TERMCAP_so=$'\e[01;33m'
+  export LESS_TERMCAP_ue=$'\e[0m'
+  export LESS_TERMCAP_us=$'\e[1;4;31m'
+  #export GNUTERM="sixelgd size 1280,360 font arial 10"
+  # XDG environment variables
+  export XDG_CONFIG_HOME="$HOME/.config"
+  export XDG_CACHE_HOME="$HOME/.cache"
+  export XDG_DATA_HOME="$HOME/.local/share"
+  export XDG_STATE_HOME="$HOME/.local/state"
+  export XDG_RUNTIME_DIR="/run/user/$UID"
+  export LANG=en_US.UTF-8
+  export LC_ALL=en_US.UTF-8
+
+
+  if has exa; then 
+    alias ls='exa --octal-permissions --color=always -g --git --sort new'
+  else
+    alias ls='ls --color'
+  fi
+
+  has prettyping  &&  alias ping='prettyping --nolegend'
+  has htop        &&  alias top='htop'
+  has btm         &&  alias btm='btm --battery --color nord'
+  has fnm         &&  alias nvm='fnm'
+  has nvim        &&  alias vim='nvim '
+  has python3     &&  alias httpd='python3 -m http.server' 
+  has less        &&  alias less='less -R'
+  has apt-file    &&  alias whathas='apt-file search'
+  has dpkg        &&  alias apt-provides='dpkg -S'
+  has tmux        &&  alias mux='tmux new -A -s km'
+  has ls          &&  alias lsd='ls -ld'
+  has stat        &&  alias stat-fs='stat -fc "%T"'
+  has glow        &&  alias glow='glow -p'
+  has shfmt       &&  alias shfmt='shfmt -i 2 -ci -bn'
+  has shfmt       &&  alias shfmt-diff='shfmt -d -i 2 -ci -bn'
+  has shfmt       &&  alias shfmt-write='shfmt -w -i 2 -ci -bn'
+  has wsl.exe     &&  alias shutdown='wsl.exe --shutdown'
+  has wsl.exe     &&  alias terminate='wsl.exe --terminate $WSL_DISTRO_NAME'
+  has npm         &&  alias vite='npm create vite@latest' 
+  has rsync       &&  alias cprs='rsync -avuP'
+  has rsync       &&  alias rscp='rsync -avuP'
+  has bat         &&  alias bat='bat --theme Nord'
+  has bat         &&  export MANPAGER="sh -c 'col -bx | bat --theme Nord -l man -p'"
+  has highlight   &&  alias dog='highlight -O ansi'
+  has feh         &&  alias slideshow='feh -rzsZFD 5'
+  has feh         &&  alias fae='feh -rzsZF'
+  #has feh         &&  alias imgpick='feh --action1 "echo -n %f | xclip -selection clipboard"'
+
+  # dumb fix for wsl
+  if has wsl.exe; then
+    wsl-fix
+  fi
+
+  # fnm
+  if [[ -d "${paths[fnm]}" ]]; then
+    eval "$(fnm env)"
+  fi
+
+  # cargo
+  if [[ -f "${paths[cargo]}"/env ]]; then
+    # shellcheck source=/dev/null
+    source "${paths[cargo]}"/env
+  fi
+
+  # starship
+  if has "starship"; then
+    eval "$(starship init bash)"
+  fi
+
+  return 0
+}
+
+main "$@"
+
+################################################################################
+# vim: set filetype=sh tabstop=4 softtabstop=2 shiftwidth=2 expandtab :

@@ -87,7 +87,8 @@ sudo apt install -y \
     bc \
     kmod \
     cpio \
-    dwarves
+    dwarves \
+    bluez
 
 # ccache
 mkdir -p "$HOME/.local/bin"

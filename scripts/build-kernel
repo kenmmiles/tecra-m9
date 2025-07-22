@@ -18,7 +18,7 @@ make -j"$(nproc)"
 echo "[3/7] Installing modules..."
 sudo make modules_install
 
-sudo ln -sf "${KDIR}" /lib/modules/"${KVER}"/build
+#sudo ln -sf "${KDIR}" /lib/modules/"${KVER}"/build
 
 echo "[5/7] Installing kernel..."
 sudo make install

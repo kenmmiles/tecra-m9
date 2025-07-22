@@ -1,0 +1,19 @@
+#!/bin/bash
+
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(dirname "$SCRIPT_DIR")"
+
+cd "$ROOT_DIR"
+git pull origin main
+git add .
+
+if [[ -n "${1:-}" ]]; then
+  commit_message="${1:-}"
+else
+  commit_message="Auto-sync: $(date +'%Y-%m-%d %H:%M:%S')"
+fi
+git commit -m "$commit_message"
+git push origin main
+echo "Sync complete!"
